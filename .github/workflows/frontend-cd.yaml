@@ -45,15 +45,28 @@ jobs:
         run: |
           aws eks update-kubeconfig --name ${{ secrets.EKS_CLUSTER_NAME }} --region ${{ secrets.AWS_REGION }}
 
-      - name: Deploy Manifests to EKS
-        run: |
-          kubectl apply -R -f k8s/ || kubectl apply -R -f ../k8s/ || true
-
-      - name: Deploy to EKS
+      - name: Apply Manifests and Deploy to EKS
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY_FRONTEND }}
           IMAGE_TAG: ${{ github.sha }}
         run: |
-          kubectl set image deployment/frontend-deployment frontend=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG || kubectl set image deployment/frontend frontend=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
-          kubectl rollout status deployment/frontend-deployment || kubectl rollout status deployment/frontend
+          # Find and apply any Kubernetes YAML manifests in the repository
+          MANIFEST_DIR=$(find . -maxdepth 3 -type d \( -name "k8s" -o -name "manifests" -o -name "deploy" \))
+          if [ -n "$MANIFEST_DIR" ]; then
+            kubectl apply -f $MANIFEST_DIR/
+          fi
+
+          # Get the actual deployment name dynamically from EKS
+          DEPLOYMENT_NAME=$(kubectl get deployments -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
+
+          if [ -z "$DEPLOYMENT_NAME" ]; then
+            echo "No deployment found in cluster. Creating one directly..."
+            kubectl create deployment frontend --image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+            kubectl rollout status deployment/frontend
+          else
+            echo "Updating deployment: $DEPLOYMENT_NAME"
+            CONTAINER_NAME=$(kubectl get deployment $DEPLOYMENT_NAME -o jsonpath='{.spec.template.spec.containers[0].name}')
+            kubectl set image deployment/$DEPLOYMENT_NAME $CONTAINER_NAME=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+            kubectl rollout status deployment/$DEPLOYMENT_NAME
+          fi
